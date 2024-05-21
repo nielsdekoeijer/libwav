@@ -5,6 +5,10 @@
 #include <string>
 #include <type_traits>
 #include <variant>
+#include <vector>
+
+#include <cstdio>
+#include <iostream>
 
 namespace Wav {
 namespace internal {
@@ -25,18 +29,40 @@ namespace internal {
         using Ts::operator()...;
     };
 
+    template <class... Ts> struct overloaded : Ts... {
+        using Ts::operator()...;
+    };
+
+    template <class... Ts> overloaded(Ts...) -> overloaded<Ts...>;
+
+    // reading helpers + casting
+    template <typename K, typename T>
+    inline void deinterleave(K& interleaved, T& x, std::size_t& i, std::size_t j)
+    {
+        x[j] = interleaved[i++];
+    }
+
+    template <typename K, typename... T> void deinterleave(K& interleaved, T&... x)
+    {
+        std::size_t i = 0;
+        for (std::size_t j = 0; j < getSize(x...); j++) {
+            (deinterleave(interleaved, x, i, j), ...);
+        }
+    }
+
+    // source: https://www.mmsp.ece.mcgill.ca/Documents/AudioFormats/WAVE/WAVE.html
     struct RIFFHeader {
         uint32_t chunkId;
         uint32_t chunkSize;
     };
 
     struct DescriptorHeader {
-        RIFFHeader riff;
+        uint32_t chunkId;
+        uint32_t chunkSize;
         uint32_t format;
     };
 
-    struct FormatHeader {
-        RIFFHeader riff;
+    struct FormatChunk16 {
         uint16_t format;
         uint16_t channelCount;
         uint32_t sampleRate;
@@ -45,20 +71,86 @@ namespace internal {
         uint16_t sampleBits;
     };
 
-    struct DataHeader {
-        RIFFHeader riff;
+    struct FormatChunk18 {
+        uint16_t format;
+        uint16_t channelCount;
+        uint32_t sampleRate;
+        uint32_t byteRate;
+        uint16_t blockAlign;
+        uint16_t sampleBits;
+        uint16_t extensionSize;
     };
 
-    template <typename T, uint16_t B> struct Format {
+    struct FormatChunk40 {
+        uint16_t format;
+        uint16_t channelCount;
+        uint32_t sampleRate;
+        uint32_t byteRate;
+        uint16_t blockAlign;
+        uint16_t sampleBits;
+        uint16_t validBitsPerSample;
+        uint32_t channelMask;
+        char subFormat[16];
+    };
+
+    struct FactHeader {
+        uint32_t chunkId;
+        uint32_t chunkSize;
+        uint32_t dwSampleLength;
+    };
+
+    struct DataHeader {
+        uint32_t chunkId;
+        uint32_t chunkSize;
+    };
+
+    using FormatChunk = std::variant<FormatChunk16, FormatChunk18, FormatChunk40>;
+    using Chunk = std::variant<RIFFHeader, DescriptorHeader, FormatChunk16, FormatChunk18,
+        FormatChunk40, FactHeader, DataHeader>;
+
+    template <typename T, uint16_t B, bool P> struct Format {
         using SampleType = T;
         static constexpr uint16_t sampleBits = B;
+        static constexpr bool isPCM = P;
     };
+    using U8LE = Format<uint8_t, 8, true>;
+    using S16LE = Format<int16_t, 16, true>;
+    using F32 = Format<float, 32, false>;
+    using F64 = Format<double, 64, false>;
 
-    using U8LE = Format<uint8_t, 8>;
-    using S16LE = Format<int16_t, 16>;
-    using F32 = Format<float, 32>;
-    using F64 = Format<double, 64>;
-    using DataFormat = std::variant<U8LE, S16LE, F32, F64>;
+    using DataFormat = std::variant<F32, U8LE, S16LE, F64>;
+
+    static FormatChunk getFormatChunk(std::size_t chunkSize)
+    {
+        switch (chunkSize) {
+        case 16:
+            return FormatChunk16 {};
+            break;
+        case 18:
+            return FormatChunk18 {};
+            break;
+        case 40:
+            return FormatChunk40 {};
+            break;
+        default:
+            throw std::runtime_error("unsupported format chunk size " + std::to_string(chunkSize));
+        }
+    }
+
+    // (optional, non PCM) fact header
+    static std::size_t getSizeBytes(Chunk chunk)
+    {
+        return std::visit(overloaded {
+                              [](RIFFHeader chunk) { return 8; },
+                              [](DescriptorHeader chunk) { return 12; },
+                              [](FormatChunk16 chunk) { return 16; },
+                              [](FormatChunk18 chunk) { return 18; },
+                              [](FormatChunk40 chunk) { return 40; },
+                              [](FactHeader chunk) { return 12; },
+                              [](DataHeader chunk) { return 8; },
+                          },
+            chunk);
+    }
 
     static DataFormat getDataFormat(uint16_t format, uint16_t sampleBits)
     {
@@ -75,6 +167,7 @@ namespace internal {
                 throw std::runtime_error("unsupported sample bits " + std::to_string(sampleBits)
                     + " for format with code " + std::to_string(format));
             }
+            break;
         case 3:
             switch (sampleBits) {
             case 32:
@@ -87,10 +180,13 @@ namespace internal {
                 throw std::runtime_error("unsupported sample bits " + std::to_string(sampleBits)
                     + " for format with code " + std::to_string(format));
             }
+            break;
         default:
             throw std::runtime_error("unsupported format with code " + std::to_string(format));
         }
+        throw std::runtime_error("unreachable");
     }
+
 }
 
 struct FileDescriptor {
@@ -110,10 +206,10 @@ static void infer(const std::string& path, FileDescriptor& descriptor)
 
     // read the descriptor header
     auto descriptorHeader = internal::DescriptorHeader {};
-    file.read(reinterpret_cast<char*>(&descriptorHeader), sizeof(descriptorHeader));
+    file.read(reinterpret_cast<char*>(&descriptorHeader), internal::getSizeBytes(descriptorHeader));
 
     const uint32_t RIFF = ('F' << 24) | ('F' << 16) | ('I' << 8) | 'R';
-    if (descriptorHeader.riff.chunkId != RIFF) {
+    if (descriptorHeader.chunkId != RIFF) {
         throw std::runtime_error("header invalid chunk id, expected 'RIFF'");
     }
 
@@ -123,26 +219,49 @@ static void infer(const std::string& path, FileDescriptor& descriptor)
     }
 
     // read the format header
-    auto formatHeader = internal::FormatHeader {};
-    file.read(reinterpret_cast<char*>(&formatHeader), sizeof(formatHeader));
+    auto formatRiff = internal::RIFFHeader {};
+    file.read(reinterpret_cast<char*>(&formatRiff), internal::getSizeBytes(formatRiff));
     const uint32_t FMT1 = (00 << 24) | ('t' << 16) | ('m' << 8) | 'f';
     const uint32_t FMT0 = (32 << 24) | ('t' << 16) | ('m' << 8) | 'f';
-    if (!(formatHeader.riff.chunkId == FMT0 or formatHeader.riff.chunkId == FMT1)) {
+    if (!(formatRiff.chunkId == FMT0 or formatRiff.chunkId == FMT1)) {
         throw std::runtime_error("Header invalid chunk id, expected 'fmt '");
     }
-    descriptor.channelCount = formatHeader.channelCount;
-    descriptor.sampleRate = formatHeader.sampleRate;
-    auto format = internal::getDataFormat(formatHeader.format, formatHeader.sampleBits);
+    auto formatChunk = internal::getFormatChunk(formatRiff.chunkSize);
+    std::size_t formatCode, sampleBits;
+    std::visit(
+        [&file, &descriptor, &formatCode, &sampleBits](auto&& formatChunk) {
+            file.read(reinterpret_cast<char*>(&formatChunk), internal::getSizeBytes(formatChunk));
+            descriptor.channelCount = formatChunk.channelCount;
+            descriptor.sampleRate = formatChunk.sampleRate;
+            formatCode = formatChunk.format;
+            sampleBits = formatChunk.sampleBits;
+        },
+        formatChunk);
+    auto format = internal::getDataFormat(formatCode, sampleBits);
+
+    // if format is not PCM, we get a fact chunk!
+    std::visit(
+        [&file](auto&& format) {
+            if (!format.isPCM) {
+                auto factHeader = internal::FactHeader {};
+                file.read(reinterpret_cast<char*>(&factHeader), internal::getSizeBytes(factHeader));
+                const uint32_t FACT = ('t' << 24) | ('c' << 16) | ('a' << 8) | 'f';
+                if (factHeader.chunkId != FACT) {
+                    throw std::runtime_error("Header invalid chunk id, expected 'FACT'"
+                        + std::to_string(factHeader.chunkId));
+                }
+            }
+        },
+        format);
 
     // read the data header
     auto dataHeader = internal::DataHeader {};
-    file.read(reinterpret_cast<char*>(&dataHeader), sizeof(dataHeader));
+    file.read(reinterpret_cast<char*>(&dataHeader), internal::getSizeBytes(dataHeader));
     const uint32_t DATA = ('a' << 24) | ('t' << 16) | ('a' << 8) | 'd';
-    if (dataHeader.riff.chunkId != DATA) {
+    if (dataHeader.chunkId != DATA) {
         throw std::runtime_error("Header invalid chunk id, expected 'data'");
     }
-    descriptor.sampleCount
-        = 8 * dataHeader.riff.chunkSize / (descriptor.channelCount * (formatHeader.sampleBits));
+    descriptor.sampleCount = 8 * dataHeader.chunkSize / (descriptor.channelCount * (sampleBits));
     descriptor.dataOffset = file.tellg();
     file.close();
 }
@@ -180,10 +299,12 @@ template <typename... T> void read(const std::string& path, T&... x)
     file.seekg(descriptor.dataOffset);
     file.read(mem.get(), byteCount);
     std::visit(
-        [mem = std::move(mem)](auto&& format) {
+        [mem = std::move(mem), sampleCount, channelCount, &x...](auto&& format) {
             // get interleaved buffer of SampleType
-            auto buff = reinterpret_cast<
-                const typename std::remove_reference_t<decltype(format)>::SampleType*>(mem.get());
+            using SampleType = typename std::remove_reference_t<decltype(format)>::SampleType;
+            SampleType* data = reinterpret_cast<SampleType*>(mem.get());
+            std::vector<SampleType> interleaved = std::vector<SampleType>(data, data + channelCount * sampleCount);
+            internal::deinterleave(interleaved, x...);
         },
         descriptor.format);
     // recursiveChannelRead(channelCount, payload, x...);

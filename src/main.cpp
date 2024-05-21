@@ -17,9 +17,13 @@ int main(int argv, char** argc)
         std::cout << "File offset: " << descriptor.dataOffset << std::endl;
 
         std::cout << "attempting to read..." << std::endl;
-        auto x = std::vector<float>(5);
-        Wav::read(argc[1], x);
+        auto x = std::vector<float>(200);
+        auto y = std::vector<float>(200);
+        Wav::read(argc[1], x, y);
+        for (std::size_t i = 0; i < 200; i++) {
+            std::cout << x[i] << std::endl;
+            std::cout << y[i] << std::endl;
+        }
         std::cout << "attempting to read OK" << std::endl;
     }
-
 }
