@@ -24,6 +24,7 @@ int main(int argv, char** argc)
             std::cout << x[i] << std::endl;
             std::cout << y[i] << std::endl;
         }
+        Wav::write("out.wav", descriptor.sampleRate, x, y);
         std::cout << "attempting to read OK" << std::endl;
     }
 }

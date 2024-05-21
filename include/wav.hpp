@@ -303,12 +303,57 @@ template <typename... T> void read(const std::string& path, T&... x)
             // get interleaved buffer of SampleType
             using SampleType = typename std::remove_reference_t<decltype(format)>::SampleType;
             SampleType* data = reinterpret_cast<SampleType*>(mem.get());
-            std::vector<SampleType> interleaved = std::vector<SampleType>(data, data + channelCount * sampleCount);
+            std::vector<SampleType> interleaved
+                = std::vector<SampleType>(data, data + channelCount * sampleCount);
             internal::deinterleave(interleaved, x...);
         },
         descriptor.format);
     // recursiveChannelRead(channelCount, payload, x...);
 }
 
-template <typename... T> void write(const std::string& path, const std::size_t rate, T&... x) { }
+template <typename... T> void write(const std::string& path, const std::size_t rate, T&... x)
+{
+    if (!internal::allSizeEqual(x...)) {
+        throw std::runtime_error("input containers unequally sized");
+    }
+    std::ofstream file(path, std::ios::binary);
+
+    std::size_t channelCount = sizeof...(x);
+    std::size_t sampleCount = internal::getSize(x...);
+    internal::DescriptorHeader descriptorHeader;
+    internal::RIFFHeader formatHeader;
+    internal::FormatChunk18 formatChunk;
+    internal::FactHeader factHeader;
+    internal::DataHeader dataHeader;
+    char* data = new char[channelCount * sampleCount * 4];
+    descriptorHeader.chunkId = ('F' << 24) | ('F' << 16) | ('I' << 8) | 'R';
+    descriptorHeader.chunkSize = 4 + (8 + getSizeBytes(formatChunk))
+        + (8 + getSizeBytes(formatHeader) + getSizeBytes(formatChunk) + getSizeBytes(factHeader)
+            + getSizeBytes(dataHeader) + sizeof(data));
+    descriptorHeader.format = ('E' << 24) | ('V' << 16) | ('A' << 8) | 'W';
+    file.write(reinterpret_cast<char*>(&descriptorHeader), internal::getSizeBytes(descriptorHeader));
+
+    formatHeader.chunkId = (32 << 24) | ('t' << 16) | ('m' << 8) | 'f';
+    formatHeader.chunkSize = getSizeBytes(formatChunk);
+    file.write(reinterpret_cast<char*>(&formatHeader), internal::getSizeBytes(formatHeader));
+
+    formatChunk.format = 3;
+    formatChunk.channelCount = channelCount;
+    formatChunk.sampleRate = rate;
+    formatChunk.byteRate = rate * channelCount * 4;
+    formatChunk.blockAlign = channelCount * 4;
+    formatChunk.sampleBits = 32;
+    formatChunk.extensionSize = 0;
+    file.write(reinterpret_cast<char*>(&formatChunk), internal::getSizeBytes(formatChunk));
+
+    factHeader.chunkId = ('t' << 24) | ('c' << 16) | ('a' << 8) | 'f'; 
+    factHeader.chunkSize = 4;
+    factHeader.dwSampleLength = channelCount * sampleCount;
+    file.write(reinterpret_cast<char*>(&factHeader), internal::getSizeBytes(factHeader));
+
+    dataHeader.chunkId = ('a' << 24) | ('t' << 16) | ('a' << 8) | 'd';
+    dataHeader.chunkSize = channelCount * sampleCount * 32 / 8;
+    file.write(reinterpret_cast<char*>(&dataHeader), internal::getSizeBytes(dataHeader));
+    file.write(data, channelCount * sampleCount * 4);
+}
 }
