@@ -3,13 +3,28 @@
 #include <fstream>
 #include <istream>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <variant>
 #include <vector>
 
+#include <iostream>
+
 namespace Wav {
 namespace internal {
+    // helper for print
+    static std::string idString(uint32_t id)
+    {
+        char chars[4];
+        chars[3] = (id >> 24) & 0xFF;
+        chars[2] = (id >> 16) & 0xFF;
+        chars[1] = (id >> 8) & 0xFF;
+        chars[0] = (id)&0xFF;
+        return std::string(chars, 4);
+    }
+
     // variadic template helpers
     template <typename First, typename... Args>
     bool allSizeEqual(const First& first, Args&&... args)
@@ -100,25 +115,15 @@ namespace internal {
         uint32_t byteRate;
         uint16_t blockAlign;
         uint16_t sampleBits;
+        uint16_t extensionSize;
         uint16_t validBitsPerSample;
         uint32_t channelMask;
         char subFormat[16];
     };
 
-    struct FactHeader {
-        uint32_t chunkId;
-        uint32_t chunkSize;
-        uint32_t dwSampleLength;
-    };
-
-    struct DataHeader {
-        uint32_t chunkId;
-        uint32_t chunkSize;
-    };
-
     using FormatChunk = std::variant<FormatChunk16, FormatChunk18, FormatChunk40>;
-    using Chunk = std::variant<RIFFHeader, DescriptorHeader, FormatChunk16, FormatChunk18,
-        FormatChunk40, FactHeader, DataHeader>;
+    using Chunk
+        = std::variant<RIFFHeader, DescriptorHeader, FormatChunk16, FormatChunk18, FormatChunk40>;
 
     template <typename T, uint16_t B, bool P> struct Format {
         using SampleType = T;
@@ -158,8 +163,6 @@ namespace internal {
                               [](FormatChunk16 chunk) { return 16; },
                               [](FormatChunk18 chunk) { return 18; },
                               [](FormatChunk40 chunk) { return 40; },
-                              [](FactHeader chunk) { return 12; },
-                              [](DataHeader chunk) { return 8; },
                           },
             chunk);
     }
@@ -227,60 +230,97 @@ static void infer(std::istream& stream, FileDescriptor& descriptor)
 
     const uint32_t RIFF = ('F' << 24) | ('F' << 16) | ('I' << 8) | 'R';
     if (descriptorHeader.chunkId != RIFF) {
-        throw std::runtime_error("header invalid chunk id, expected 'RIFF'");
+        throw std::runtime_error("header invalid chunk id, expected 'RIFF', got "
+            + internal::idString(descriptorHeader.chunkId));
     }
 
     const uint32_t WAVE = ('E' << 24) | ('V' << 16) | ('A' << 8) | 'W';
     if (descriptorHeader.format != WAVE) {
-        throw std::runtime_error("Header invalid chunk id, expected 'WAVE'");
+        throw std::runtime_error("Header invalid chunk id, expected 'WAVE', got "
+            + internal::idString(descriptorHeader.format));
     }
 
-    // read the format header
-    auto formatRiff = internal::RIFFHeader {};
-    stream.read(reinterpret_cast<char*>(&formatRiff), internal::getSizeBytes(formatRiff));
+    // now, we read various headers.
+    // there can be a bunch, most we dont give a fuck about.
+    // https://www.recordingblogs.com/wiki/wave-file-format
+    // we require at least the format chunk and the data chunk
     const uint32_t FMT1 = (00 << 24) | ('t' << 16) | ('m' << 8) | 'f';
     const uint32_t FMT0 = (32 << 24) | ('t' << 16) | ('m' << 8) | 'f';
-    if (!(formatRiff.chunkId == FMT0 or formatRiff.chunkId == FMT1)) {
-        throw std::runtime_error("Header invalid chunk id, expected 'fmt '");
-    }
-    auto formatChunk = internal::getFormatChunk(formatRiff.chunkSize);
-    std::size_t formatCode, sampleBits;
-    std::visit(
-        [&stream, &descriptor, &formatCode, &sampleBits](auto&& formatChunk) {
-            stream.read(reinterpret_cast<char*>(&formatChunk), internal::getSizeBytes(formatChunk));
-            descriptor.channelCount = formatChunk.channelCount;
-            descriptor.sampleRate = formatChunk.sampleRate;
-            formatCode = formatChunk.format;
-            sampleBits = formatChunk.sampleBits;
-        },
-        formatChunk);
-    auto format = internal::getDataFormat(formatCode, sampleBits);
-
-    // if format is not PCM, we get a fact chunk!
-    std::visit(
-        [&stream](auto&& format) {
-            if (!format.isPCM) {
-                auto factHeader = internal::FactHeader {};
-                stream.read(
-                    reinterpret_cast<char*>(&factHeader), internal::getSizeBytes(factHeader));
-                const uint32_t FACT = ('t' << 24) | ('c' << 16) | ('a' << 8) | 'f';
-                if (factHeader.chunkId != FACT) {
-                    throw std::runtime_error("Header invalid chunk id, expected 'FACT'"
-                        + std::to_string(factHeader.chunkId));
-                }
-            }
-        },
-        format);
-
-    // read the data header
-    auto dataHeader = internal::DataHeader {};
-    stream.read(reinterpret_cast<char*>(&dataHeader), internal::getSizeBytes(dataHeader));
     const uint32_t DATA = ('a' << 24) | ('t' << 16) | ('a' << 8) | 'd';
-    if (dataHeader.chunkId != DATA) {
-        throw std::runtime_error("Header invalid chunk id, expected 'data'");
+
+    // read the format header
+    std::optional<internal::DataFormat> format;
+    bool foundFMT = false;
+    bool foundDATA = false;
+    while (true) {
+        internal::RIFFHeader riff;
+        if (!stream.read(reinterpret_cast<char*>(&riff), internal::getSizeBytes(riff))) {
+            if (stream.eof()) {
+                break; // End of file reached
+            } else {
+                throw std::runtime_error("error reading from file");
+            }
+        }
+        std::cout << "got " << internal::idString(riff.chunkId) << ", reading " << riff.chunkSize << " bytes" << std::endl;
+
+        if (riff.chunkId == FMT0 or riff.chunkId == FMT1) {
+            auto formatChunk = internal::getFormatChunk(riff.chunkSize);
+            std::visit(
+                internal::overloaded {
+                    [&stream, &descriptor, &format](internal::FormatChunk40&& formatChunk) {
+                        stream.read(reinterpret_cast<char*>(&formatChunk),
+                            internal::getSizeBytes(formatChunk));
+                        descriptor.channelCount = formatChunk.channelCount;
+                        descriptor.sampleRate = formatChunk.sampleRate;
+                        if (formatChunk.format != 0xFFFE) {
+                            throw std::runtime_error(
+                                "Invalid format id for WAVE_FORMAT_EXTENSIBLE, expected 0xFFFE got "
+                                + std::to_string(formatChunk.format));
+                        }
+                        std::size_t formatCode
+                            = *reinterpret_cast<const uint16_t*>(formatChunk.subFormat);
+                        std::size_t sampleBits = formatChunk.sampleBits;
+                        format = internal::getDataFormat(formatCode, sampleBits);
+                    },
+                    [&stream, &descriptor, &format](auto&& formatChunk) {
+                        stream.read(reinterpret_cast<char*>(&formatChunk),
+                            internal::getSizeBytes(formatChunk));
+                        descriptor.channelCount = formatChunk.channelCount;
+                        descriptor.sampleRate = formatChunk.sampleRate;
+                        std::size_t formatCode = formatChunk.format;
+                        std::size_t sampleBits = formatChunk.sampleBits;
+                        format = internal::getDataFormat(formatCode, sampleBits);
+                    },
+                },
+                std::move(formatChunk));
+            foundFMT = true;
+            continue;
+        }
+
+        if (riff.chunkId == DATA) {
+            if (!format.has_value()) {
+                throw std::runtime_error("got 'DATA' chunk before 'fmt ' chunk");
+            }
+            std::visit(
+                [&stream, &descriptor, &riff](auto&& format) {
+                    descriptor.sampleCount
+                        = 8 * riff.chunkSize / (descriptor.channelCount * (format.sampleBits));
+                    descriptor.dataOffset = stream.tellg();
+                },
+                format.value());
+            foundDATA = true;
+            break;
+        }
+
+        stream.seekg(riff.chunkSize, std::ios::cur);
     }
-    descriptor.sampleCount = 8 * dataHeader.chunkSize / (descriptor.channelCount * (sampleBits));
-    descriptor.dataOffset = stream.tellg();
+
+    if (!foundFMT) {
+        throw std::runtime_error("failed to find 'fmt ' chunk");
+    }
+    if (!foundDATA) {
+        throw std::runtime_error("failed to find 'DATA' chunk");
+    }
 }
 
 static void infer(const std::string& path, FileDescriptor& descriptor)
@@ -360,8 +400,8 @@ template <typename... T> void write(std::ostream& stream, const std::size_t rate
     internal::DescriptorHeader descriptorHeader;
     internal::RIFFHeader formatHeader;
     internal::FormatChunk18 formatChunk;
-    internal::FactHeader factHeader;
-    internal::DataHeader dataHeader;
+    internal::RIFFHeader factHeader;
+    internal::RIFFHeader dataHeader;
     auto mem = std::unique_ptr<float[]>(new float[channelCount * sampleCount]);
     descriptorHeader.chunkId = ('F' << 24) | ('F' << 16) | ('I' << 8) | 'R';
     descriptorHeader.chunkSize = 4 + (8 + getSizeBytes(formatChunk))
@@ -386,8 +426,9 @@ template <typename... T> void write(std::ostream& stream, const std::size_t rate
 
     factHeader.chunkId = ('t' << 24) | ('c' << 16) | ('a' << 8) | 'f';
     factHeader.chunkSize = 4;
-    factHeader.dwSampleLength = channelCount * sampleCount;
     stream.write(reinterpret_cast<char*>(&factHeader), internal::getSizeBytes(factHeader));
+    uint32_t dwSampleLength = channelCount * sampleCount;
+    stream.write(reinterpret_cast<char*>(&dwSampleLength), 4);
 
     dataHeader.chunkId = ('a' << 24) | ('t' << 16) | ('a' << 8) | 'd';
     dataHeader.chunkSize = channelCount * sampleCount * 32 / 8;

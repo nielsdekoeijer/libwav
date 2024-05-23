@@ -22,20 +22,14 @@ int main(int argv, char** argc)
         std::cout << "File offset: " << descriptor.dataOffset << std::endl;
 
         std::cout << "attempting to read..." << std::endl;
-        auto x = std::vector<float>(5000);
-        auto y = std::vector<float>(5000);
+        auto x = std::vector<float>(50000);
+        auto y = std::vector<float>(50000);
         Wav::read(file, x, y);
-        for (std::size_t i = 0; i < 5000; i++) {
-            x[i] += 0.5;
-            y[i] -= 0.5;
-            std::cout << x[i] << std::endl;
-            std::cout << y[i] << std::endl;
-        }
         std::ofstream ofile("out.wav", std::ios::binary);
         if (!ofile) {
             throw std::runtime_error("failed to open file at " + std::string(argc[1]));
         }
-        for (std::size_t i = 0; i < 5000; i++) {
+        for (std::size_t i = 0; i < 50000; i++) {
             std::cout << x[i] << std::endl;
             std::cout << y[i] << std::endl;
         }
