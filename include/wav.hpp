@@ -1,14 +1,12 @@
 #pragma once
 
+#include <fstream>
 #include <istream>
 #include <memory>
 #include <string>
 #include <type_traits>
 #include <variant>
 #include <vector>
-
-#include <cstdio>
-#include <iostream>
 
 namespace Wav {
 namespace internal {
@@ -54,7 +52,6 @@ namespace internal {
     inline void interleave(K& interleaved, T& x, std::size_t& i, std::size_t j)
     {
         interleaved[i++] = x[j];
-        std::cout << interleaved[i - 1] << std::endl;
     }
 
     template <typename K, typename... T> void interleave(K& interleaved, T&... x)
@@ -225,7 +222,8 @@ static void infer(std::istream& stream, FileDescriptor& descriptor)
 
     // read the descriptor header
     auto descriptorHeader = internal::DescriptorHeader {};
-    stream.read(reinterpret_cast<char*>(&descriptorHeader), internal::getSizeBytes(descriptorHeader));
+    stream.read(
+        reinterpret_cast<char*>(&descriptorHeader), internal::getSizeBytes(descriptorHeader));
 
     const uint32_t RIFF = ('F' << 24) | ('F' << 16) | ('I' << 8) | 'R';
     if (descriptorHeader.chunkId != RIFF) {
@@ -263,7 +261,8 @@ static void infer(std::istream& stream, FileDescriptor& descriptor)
         [&stream](auto&& format) {
             if (!format.isPCM) {
                 auto factHeader = internal::FactHeader {};
-                stream.read(reinterpret_cast<char*>(&factHeader), internal::getSizeBytes(factHeader));
+                stream.read(
+                    reinterpret_cast<char*>(&factHeader), internal::getSizeBytes(factHeader));
                 const uint32_t FACT = ('t' << 24) | ('c' << 16) | ('a' << 8) | 'f';
                 if (factHeader.chunkId != FACT) {
                     throw std::runtime_error("Header invalid chunk id, expected 'FACT'"
@@ -282,6 +281,15 @@ static void infer(std::istream& stream, FileDescriptor& descriptor)
     }
     descriptor.sampleCount = 8 * dataHeader.chunkSize / (descriptor.channelCount * (sampleBits));
     descriptor.dataOffset = stream.tellg();
+}
+
+static void infer(const std::string& path, FileDescriptor& descriptor)
+{
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) {
+        throw std::runtime_error("failed to open file at " + std::string(path));
+    }
+    infer(stream, descriptor);
 }
 
 template <typename... T> void read(std::istream& stream, T&... x)
@@ -330,7 +338,15 @@ template <typename... T> void read(std::istream& stream, T&... x)
             internal::deinterleave(interleaved, x...);
         },
         descriptor.format);
-    // recursiveChannelRead(channelCount, payload, x...);
+}
+
+template <typename... T> void read(std::string& path, T&... x)
+{
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) {
+        throw std::runtime_error("failed to open file at " + std::string(path));
+    }
+    read(stream, x...);
 }
 
 template <typename... T> void write(std::ostream& stream, const std::size_t rate, T&... x)
@@ -380,5 +396,14 @@ template <typename... T> void write(std::ostream& stream, const std::size_t rate
     auto vec = std::vector<float>(mem.get(), mem.get() + channelCount * sampleCount);
     internal::interleave(vec, x...);
     stream.write(reinterpret_cast<char*>(vec.data()), channelCount * sampleCount * 4);
+}
+
+template <typename... T> void write(const std::string& path, const std::size_t rate, T&... x)
+{
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) {
+        throw std::runtime_error("failed to open file at " + std::string(path));
+    }
+    read(stream, rate, x...);
 }
 }
