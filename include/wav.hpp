@@ -404,6 +404,6 @@ template <typename... T> void write(const std::string& path, const std::size_t r
     if (!stream) {
         throw std::runtime_error("failed to open file at " + std::string(path));
     }
-    read(stream, rate, x...);
+    write(stream, rate, x...);
 }
 }
