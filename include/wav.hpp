@@ -400,7 +400,7 @@ template <typename... T> void write(std::ostream& stream, const std::size_t rate
 
 template <typename... T> void write(const std::string& path, const std::size_t rate, T&... x)
 {
-    std::ifstream stream(path, std::ios::binary);
+    std::ofstream stream(path, std::ios::binary);
     if (!stream) {
         throw std::runtime_error("failed to open file at " + std::string(path));
     }
