@@ -79,7 +79,6 @@ namespace internal {
 
     // Interleaving in two template functions
     // TODO: casting interface for different types
-
     template <typename K, typename T>
     inline void interleave(K& interleaved, T& x, std::size_t& i, std::size_t j)
     {
@@ -98,7 +97,6 @@ namespace internal {
     // source: https://www.mmsp.ece.mcgill.ca/Documents/AudioFormats/WAVE/WAVE.html
     // TODO: somewhat verbose for the different format chunks. potential DRY violations that can be
     // optimized out
-
     struct DescriptorHeader {
         uint32_t chunkId;
         uint32_t chunkSize;
@@ -142,7 +140,10 @@ namespace internal {
         char subFormat[16];
     };
 
+    // Variant for the format chunks, so that they can be iterated over using pattern matching
     using FormatChunk = std::variant<FormatChunk16, FormatChunk18, FormatChunk40>;
+
+    // Variant for the supported chunks, so that they can be iterated over using pattern matching
     using SupportedChunk
         = std::variant<RIFFHeader, DescriptorHeader, FormatChunk16, FormatChunk18, FormatChunk40>;
 
@@ -153,15 +154,17 @@ namespace internal {
         static constexpr bool isPCM = _isPCM;
     };
 
-    // Aliases + variants for different supported formats
+    // Aliases for different supported formats
     using U8LE = Format<uint8_t, 8, true>;
     using S16LE = Format<int16_t, 16, true>;
     using F32 = Format<float, 32, false>;
     using F64 = Format<double, 64, false>;
+
+    // Variant for supported type
     using DataFormat = std::variant<F32, U8LE, S16LE, F64>;
 
     // Aliases + variants for different supported formats
-    static FormatChunk getFormatChunk(std::size_t chunkSize)
+    static FormatChunk getFormat(std::size_t chunkSize)
     {
         switch (chunkSize) {
         case 16:
@@ -178,6 +181,10 @@ namespace internal {
         }
     }
 
+    // Gets the raw bytes per struct.
+    // TODO: Naively, we could have used sizeof in place of this. Unfortunately, sizeof gives us the
+    // PADDED size; the compiler adds padding to make cache nice... This leads to use essentially
+    // fucking up the cursor for reading. Hence, I have this for now. But a smaller solution may be possible.
     static std::size_t getSizeBytes(SupportedChunk chunk)
     {
         return std::visit(overloaded {
@@ -190,6 +197,7 @@ namespace internal {
             chunk);
     }
 
+    // Map to variant based on format int and number of bits per sample
     static DataFormat getDataFormat(uint16_t format, uint16_t sampleBits)
     {
         switch (format) {
@@ -225,6 +233,7 @@ namespace internal {
         throw std::runtime_error("unreachable");
     }
 
+    // Helper to read and validate a description header.
     static void readDescriptorHeader(std::istream& stream, DescriptorHeader& header)
     {
         stream.read(reinterpret_cast<char*>(&header), internal::getSizeBytes(header));
@@ -249,6 +258,9 @@ struct FileDescriptor {
     internal::DataFormat format;
 };
 
+// Infer properties
+// TODO: We currently break after the data field. I'm not sure that this is correct, really. Its
+// just general laziness for now.
 static void infer(std::istream& stream, FileDescriptor& descriptor)
 {
     // ensure the stream is in binary mode if necessary
@@ -285,7 +297,7 @@ static void infer(std::istream& stream, FileDescriptor& descriptor)
                   << " bytes" << std::endl;
 
         if (riff.chunkId == internal::FMT0 or riff.chunkId == internal::FMT1) {
-            auto formatChunk = internal::getFormatChunk(riff.chunkSize);
+            auto formatChunk = internal::getFormat(riff.chunkSize);
             std::visit(
                 internal::overloaded {
                     [&stream, &descriptor, &format](internal::FormatChunk40&& formatChunk) {
@@ -353,6 +365,10 @@ static void infer(const std::string& path, FileDescriptor& descriptor)
     infer(stream, descriptor);
 }
 
+// Read any (???) wav file into f32/f64
+// TODO: Throw if not T... f32 or f64
+// TODO: We might infer twice with this flow, potential for optimization where we pass the inferred
+// struct ourselves. Not sure if its worth the API verbosity.
 template <typename... T> void read(std::istream& stream, T&... x)
 {
     // ensure the stream is in binary mode if necessary
@@ -398,6 +414,7 @@ template <typename... T> void read(std::istream& stream, T&... x)
         descriptor.format);
 }
 
+// Helper, usually what you'd do
 template <typename... T> void read(std::string& path, T&... x)
 {
     std::ifstream stream(path, std::ios::binary);
@@ -407,6 +424,8 @@ template <typename... T> void read(std::string& path, T&... x)
     read(stream, x...);
 }
 
+// Write a wav file to an N channel f32-pcm file
+// TODO: This is unreadable garbage please change
 template <typename... T> void write(std::ostream& stream, const std::size_t rate, T&... x)
 {
     if (!internal::allSizeEqual(x...)) {
@@ -457,6 +476,7 @@ template <typename... T> void write(std::ostream& stream, const std::size_t rate
     stream.write(reinterpret_cast<char*>(vec.data()), channelCount * sampleCount * 4);
 }
 
+// Helper, usually what you'd do
 template <typename... T> void write(const std::string& path, const std::size_t rate, T&... x)
 {
     std::ofstream stream(path, std::ios::binary);
