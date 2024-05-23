@@ -1,6 +1,6 @@
 #pragma once
 
-#include <fstream>
+#include <istream>
 #include <memory>
 #include <string>
 #include <type_traits>
@@ -47,6 +47,21 @@ namespace internal {
         std::size_t i = 0;
         for (std::size_t j = 0; j < getSize(x...); j++) {
             (deinterleave(interleaved, x, i, j), ...);
+        }
+    }
+
+    template <typename K, typename T>
+    inline void interleave(K& interleaved, T& x, std::size_t& i, std::size_t j)
+    {
+        interleaved[i++] = x[j];
+        std::cout << interleaved[i - 1] << std::endl;
+    }
+
+    template <typename K, typename... T> void interleave(K& interleaved, T&... x)
+    {
+        std::size_t i = 0;
+        for (std::size_t j = 0; j < getSize(x...); j++) {
+            (interleave(interleaved, x, i, j), ...);
         }
     }
 
@@ -197,16 +212,20 @@ struct FileDescriptor {
     internal::DataFormat format;
 };
 
-static void infer(const std::string& path, FileDescriptor& descriptor)
+static void infer(std::istream& stream, FileDescriptor& descriptor)
 {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        throw std::runtime_error("failed to open file at" + path);
+    // ensure the stream is in binary mode if necessary
+    stream.seekg(0, std::ios::end);
+    std::streampos length = stream.tellg();
+    stream.seekg(0, std::ios::beg);
+
+    if (length == -1) {
+        throw std::runtime_error("failed to determine stream length");
     }
 
     // read the descriptor header
     auto descriptorHeader = internal::DescriptorHeader {};
-    file.read(reinterpret_cast<char*>(&descriptorHeader), internal::getSizeBytes(descriptorHeader));
+    stream.read(reinterpret_cast<char*>(&descriptorHeader), internal::getSizeBytes(descriptorHeader));
 
     const uint32_t RIFF = ('F' << 24) | ('F' << 16) | ('I' << 8) | 'R';
     if (descriptorHeader.chunkId != RIFF) {
@@ -220,7 +239,7 @@ static void infer(const std::string& path, FileDescriptor& descriptor)
 
     // read the format header
     auto formatRiff = internal::RIFFHeader {};
-    file.read(reinterpret_cast<char*>(&formatRiff), internal::getSizeBytes(formatRiff));
+    stream.read(reinterpret_cast<char*>(&formatRiff), internal::getSizeBytes(formatRiff));
     const uint32_t FMT1 = (00 << 24) | ('t' << 16) | ('m' << 8) | 'f';
     const uint32_t FMT0 = (32 << 24) | ('t' << 16) | ('m' << 8) | 'f';
     if (!(formatRiff.chunkId == FMT0 or formatRiff.chunkId == FMT1)) {
@@ -229,8 +248,8 @@ static void infer(const std::string& path, FileDescriptor& descriptor)
     auto formatChunk = internal::getFormatChunk(formatRiff.chunkSize);
     std::size_t formatCode, sampleBits;
     std::visit(
-        [&file, &descriptor, &formatCode, &sampleBits](auto&& formatChunk) {
-            file.read(reinterpret_cast<char*>(&formatChunk), internal::getSizeBytes(formatChunk));
+        [&stream, &descriptor, &formatCode, &sampleBits](auto&& formatChunk) {
+            stream.read(reinterpret_cast<char*>(&formatChunk), internal::getSizeBytes(formatChunk));
             descriptor.channelCount = formatChunk.channelCount;
             descriptor.sampleRate = formatChunk.sampleRate;
             formatCode = formatChunk.format;
@@ -241,10 +260,10 @@ static void infer(const std::string& path, FileDescriptor& descriptor)
 
     // if format is not PCM, we get a fact chunk!
     std::visit(
-        [&file](auto&& format) {
+        [&stream](auto&& format) {
             if (!format.isPCM) {
                 auto factHeader = internal::FactHeader {};
-                file.read(reinterpret_cast<char*>(&factHeader), internal::getSizeBytes(factHeader));
+                stream.read(reinterpret_cast<char*>(&factHeader), internal::getSizeBytes(factHeader));
                 const uint32_t FACT = ('t' << 24) | ('c' << 16) | ('a' << 8) | 'f';
                 if (factHeader.chunkId != FACT) {
                     throw std::runtime_error("Header invalid chunk id, expected 'FACT'"
@@ -256,24 +275,32 @@ static void infer(const std::string& path, FileDescriptor& descriptor)
 
     // read the data header
     auto dataHeader = internal::DataHeader {};
-    file.read(reinterpret_cast<char*>(&dataHeader), internal::getSizeBytes(dataHeader));
+    stream.read(reinterpret_cast<char*>(&dataHeader), internal::getSizeBytes(dataHeader));
     const uint32_t DATA = ('a' << 24) | ('t' << 16) | ('a' << 8) | 'd';
     if (dataHeader.chunkId != DATA) {
         throw std::runtime_error("Header invalid chunk id, expected 'data'");
     }
     descriptor.sampleCount = 8 * dataHeader.chunkSize / (descriptor.channelCount * (sampleBits));
-    descriptor.dataOffset = file.tellg();
-    file.close();
+    descriptor.dataOffset = stream.tellg();
 }
 
-template <typename... T> void read(const std::string& path, T&... x)
+template <typename... T> void read(std::istream& stream, T&... x)
 {
+    // ensure the stream is in binary mode if necessary
+    stream.seekg(0, std::ios::end);
+    std::streampos length = stream.tellg();
+    stream.seekg(0, std::ios::beg);
+
+    if (length == -1) {
+        throw std::runtime_error("failed to determine stream length");
+    }
+
     if (!internal::allSizeEqual(x...)) {
         throw std::runtime_error("input containers unequally sized");
     }
 
     FileDescriptor descriptor;
-    infer(path, descriptor);
+    infer(stream, descriptor);
     std::size_t channelCount = sizeof...(x);
     if (descriptor.channelCount != channelCount) {
         throw std::runtime_error("provided " + std::to_string(channelCount)
@@ -290,14 +317,9 @@ template <typename... T> void read(const std::string& path, T&... x)
     std::size_t byteCount = sampleCount * channelCount * sampleBytes;
     auto mem = std::unique_ptr<char[]>(new char[byteCount]);
 
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        throw std::runtime_error("failed to open file at" + path);
-    }
-
     // move to the data block + read
-    file.seekg(descriptor.dataOffset);
-    file.read(mem.get(), byteCount);
+    stream.seekg(descriptor.dataOffset);
+    stream.read(mem.get(), byteCount);
     std::visit(
         [mem = std::move(mem), sampleCount, channelCount, &x...](auto&& format) {
             // get interleaved buffer of SampleType
@@ -311,12 +333,11 @@ template <typename... T> void read(const std::string& path, T&... x)
     // recursiveChannelRead(channelCount, payload, x...);
 }
 
-template <typename... T> void write(const std::string& path, const std::size_t rate, T&... x)
+template <typename... T> void write(std::ostream& stream, const std::size_t rate, T&... x)
 {
     if (!internal::allSizeEqual(x...)) {
         throw std::runtime_error("input containers unequally sized");
     }
-    std::ofstream file(path, std::ios::binary);
 
     std::size_t channelCount = sizeof...(x);
     std::size_t sampleCount = internal::getSize(x...);
@@ -325,17 +346,18 @@ template <typename... T> void write(const std::string& path, const std::size_t r
     internal::FormatChunk18 formatChunk;
     internal::FactHeader factHeader;
     internal::DataHeader dataHeader;
-    char* data = new char[channelCount * sampleCount * 4];
+    auto mem = std::unique_ptr<float[]>(new float[channelCount * sampleCount]);
     descriptorHeader.chunkId = ('F' << 24) | ('F' << 16) | ('I' << 8) | 'R';
     descriptorHeader.chunkSize = 4 + (8 + getSizeBytes(formatChunk))
         + (8 + getSizeBytes(formatHeader) + getSizeBytes(formatChunk) + getSizeBytes(factHeader)
-            + getSizeBytes(dataHeader) + sizeof(data));
+            + getSizeBytes(dataHeader) + sizeof(mem));
     descriptorHeader.format = ('E' << 24) | ('V' << 16) | ('A' << 8) | 'W';
-    file.write(reinterpret_cast<char*>(&descriptorHeader), internal::getSizeBytes(descriptorHeader));
+    stream.write(
+        reinterpret_cast<char*>(&descriptorHeader), internal::getSizeBytes(descriptorHeader));
 
     formatHeader.chunkId = (32 << 24) | ('t' << 16) | ('m' << 8) | 'f';
     formatHeader.chunkSize = getSizeBytes(formatChunk);
-    file.write(reinterpret_cast<char*>(&formatHeader), internal::getSizeBytes(formatHeader));
+    stream.write(reinterpret_cast<char*>(&formatHeader), internal::getSizeBytes(formatHeader));
 
     formatChunk.format = 3;
     formatChunk.channelCount = channelCount;
@@ -344,16 +366,19 @@ template <typename... T> void write(const std::string& path, const std::size_t r
     formatChunk.blockAlign = channelCount * 4;
     formatChunk.sampleBits = 32;
     formatChunk.extensionSize = 0;
-    file.write(reinterpret_cast<char*>(&formatChunk), internal::getSizeBytes(formatChunk));
+    stream.write(reinterpret_cast<char*>(&formatChunk), internal::getSizeBytes(formatChunk));
 
-    factHeader.chunkId = ('t' << 24) | ('c' << 16) | ('a' << 8) | 'f'; 
+    factHeader.chunkId = ('t' << 24) | ('c' << 16) | ('a' << 8) | 'f';
     factHeader.chunkSize = 4;
     factHeader.dwSampleLength = channelCount * sampleCount;
-    file.write(reinterpret_cast<char*>(&factHeader), internal::getSizeBytes(factHeader));
+    stream.write(reinterpret_cast<char*>(&factHeader), internal::getSizeBytes(factHeader));
 
     dataHeader.chunkId = ('a' << 24) | ('t' << 16) | ('a' << 8) | 'd';
     dataHeader.chunkSize = channelCount * sampleCount * 32 / 8;
-    file.write(reinterpret_cast<char*>(&dataHeader), internal::getSizeBytes(dataHeader));
-    file.write(data, channelCount * sampleCount * 4);
+    stream.write(reinterpret_cast<char*>(&dataHeader), internal::getSizeBytes(dataHeader));
+
+    auto vec = std::vector<float>(mem.get(), mem.get() + channelCount * sampleCount);
+    internal::interleave(vec, x...);
+    stream.write(reinterpret_cast<char*>(vec.data()), channelCount * sampleCount * 4);
 }
 }
