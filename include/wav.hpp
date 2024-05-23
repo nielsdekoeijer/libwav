@@ -12,9 +12,20 @@
 
 #include <iostream>
 
+// TODO: use of static? Whats the implication again? I don't remember
+// TODO: cleanup read / infer
+// TODO: cleanup write
+
 namespace Wav {
 namespace internal {
-    // helper for print
+    // Supported RIFF header chunk ids, others are ignored
+    const uint32_t FMT1 = (00 << 24) | ('t' << 16) | ('m' << 8) | 'f';
+    const uint32_t FMT0 = (32 << 24) | ('t' << 16) | ('m' << 8) | 'f';
+    const uint32_t DATA = ('a' << 24) | ('t' << 16) | ('a' << 8) | 'd';
+    const uint32_t RIFF = ('F' << 24) | ('F' << 16) | ('I' << 8) | 'R';
+    const uint32_t WAVE = ('E' << 24) | ('V' << 16) | ('A' << 8) | 'W';
+
+    // Helper function for printing header chunk ids for debug purposes
     static std::string idString(uint32_t id)
     {
         char chars[4];
@@ -25,19 +36,21 @@ namespace internal {
         return std::string(chars, 4);
     }
 
-    // variadic template helpers
+    // Variadic template helper to ensure all input STL containers are of equal size
     template <typename First, typename... Args>
     bool allSizeEqual(const First& first, Args&&... args)
     {
         return ((first.size() == ((Args &&) args).size()) && ...);
     }
 
+    // Variadic template helper to get the size of the first STL container
     template <typename First, typename... Args>
     std::size_t getSize(const First& first, Args&&... args)
     {
         return first.size();
     }
 
+    // Variadic template helpers to provide a pattern-matching-like API when using std::variant
     template <typename... Ts> struct Overload : Ts... {
         using Ts::operator()...;
     };
@@ -48,7 +61,8 @@ namespace internal {
 
     template <class... Ts> overloaded(Ts...) -> overloaded<Ts...>;
 
-    // reading helpers + casting
+    // Deinterleaving in two template functions
+    // TODO: casting interface for different types
     template <typename K, typename T>
     inline void deinterleave(K& interleaved, T& x, std::size_t& i, std::size_t j)
     {
@@ -62,6 +76,9 @@ namespace internal {
             (deinterleave(interleaved, x, i, j), ...);
         }
     }
+
+    // Interleaving in two template functions
+    // TODO: casting interface for different types
 
     template <typename K, typename T>
     inline void interleave(K& interleaved, T& x, std::size_t& i, std::size_t j)
@@ -77,16 +94,20 @@ namespace internal {
         }
     }
 
+    // Structs for representing RIFF and WAV headers
     // source: https://www.mmsp.ece.mcgill.ca/Documents/AudioFormats/WAVE/WAVE.html
-    struct RIFFHeader {
-        uint32_t chunkId;
-        uint32_t chunkSize;
-    };
+    // TODO: somewhat verbose for the different format chunks. potential DRY violations that can be
+    // optimized out
 
     struct DescriptorHeader {
         uint32_t chunkId;
         uint32_t chunkSize;
         uint32_t format;
+    };
+
+    struct RIFFHeader {
+        uint32_t chunkId;
+        uint32_t chunkSize;
     };
 
     struct FormatChunk16 {
@@ -122,21 +143,24 @@ namespace internal {
     };
 
     using FormatChunk = std::variant<FormatChunk16, FormatChunk18, FormatChunk40>;
-    using Chunk
+    using SupportedChunk
         = std::variant<RIFFHeader, DescriptorHeader, FormatChunk16, FormatChunk18, FormatChunk40>;
 
-    template <typename T, uint16_t B, bool P> struct Format {
-        using SampleType = T;
-        static constexpr uint16_t sampleBits = B;
-        static constexpr bool isPCM = P;
+    // Generic type that wraps information about supported formats
+    template <typename _SampleType, std::size_t _sampleBits, bool _isPCM> struct Format {
+        using SampleType = _SampleType;
+        static constexpr uint16_t sampleBits = _sampleBits;
+        static constexpr bool isPCM = _isPCM;
     };
+
+    // Aliases + variants for different supported formats
     using U8LE = Format<uint8_t, 8, true>;
     using S16LE = Format<int16_t, 16, true>;
     using F32 = Format<float, 32, false>;
     using F64 = Format<double, 64, false>;
-
     using DataFormat = std::variant<F32, U8LE, S16LE, F64>;
 
+    // Aliases + variants for different supported formats
     static FormatChunk getFormatChunk(std::size_t chunkSize)
     {
         switch (chunkSize) {
@@ -154,8 +178,7 @@ namespace internal {
         }
     }
 
-    // (optional, non PCM) fact header
-    static std::size_t getSizeBytes(Chunk chunk)
+    static std::size_t getSizeBytes(SupportedChunk chunk)
     {
         return std::visit(overloaded {
                               [](RIFFHeader chunk) { return 8; },
@@ -202,6 +225,20 @@ namespace internal {
         throw std::runtime_error("unreachable");
     }
 
+    static void readDescriptorHeader(std::istream& stream, DescriptorHeader& header)
+    {
+        stream.read(reinterpret_cast<char*>(&header), internal::getSizeBytes(header));
+
+        if (header.chunkId != RIFF) {
+            throw std::runtime_error("header invalid chunk id, expected 'RIFF', got "
+                + internal::idString(header.chunkId));
+        }
+
+        if (header.format != WAVE) {
+            throw std::runtime_error("Header invalid chunk id, expected 'WAVE', got "
+                + internal::idString(header.format));
+        }
+    }
 }
 
 struct FileDescriptor {
@@ -218,35 +255,18 @@ static void infer(std::istream& stream, FileDescriptor& descriptor)
     stream.seekg(0, std::ios::end);
     std::streampos length = stream.tellg();
     stream.seekg(0, std::ios::beg);
-
     if (length == -1) {
         throw std::runtime_error("failed to determine stream length");
     }
 
     // read the descriptor header
     auto descriptorHeader = internal::DescriptorHeader {};
-    stream.read(
-        reinterpret_cast<char*>(&descriptorHeader), internal::getSizeBytes(descriptorHeader));
-
-    const uint32_t RIFF = ('F' << 24) | ('F' << 16) | ('I' << 8) | 'R';
-    if (descriptorHeader.chunkId != RIFF) {
-        throw std::runtime_error("header invalid chunk id, expected 'RIFF', got "
-            + internal::idString(descriptorHeader.chunkId));
-    }
-
-    const uint32_t WAVE = ('E' << 24) | ('V' << 16) | ('A' << 8) | 'W';
-    if (descriptorHeader.format != WAVE) {
-        throw std::runtime_error("Header invalid chunk id, expected 'WAVE', got "
-            + internal::idString(descriptorHeader.format));
-    }
+    internal::readDescriptorHeader(stream, descriptorHeader);
 
     // now, we read various headers.
-    // there can be a bunch, most we dont give a fuck about.
-    // https://www.recordingblogs.com/wiki/wave-file-format
-    // we require at least the format chunk and the data chunk
-    const uint32_t FMT1 = (00 << 24) | ('t' << 16) | ('m' << 8) | 'f';
-    const uint32_t FMT0 = (32 << 24) | ('t' << 16) | ('m' << 8) | 'f';
-    const uint32_t DATA = ('a' << 24) | ('t' << 16) | ('a' << 8) | 'd';
+    // there can be a bunch, most we dont give a fuck about
+    // source: https://www.recordingblogs.com/wiki/wave-file-format
+    // we require at least the format chunk and the data chunk though :-)
 
     // read the format header
     std::optional<internal::DataFormat> format;
@@ -261,9 +281,10 @@ static void infer(std::istream& stream, FileDescriptor& descriptor)
                 throw std::runtime_error("error reading from file");
             }
         }
-        std::cout << "got " << internal::idString(riff.chunkId) << ", reading " << riff.chunkSize << " bytes" << std::endl;
+        std::cout << "got " << internal::idString(riff.chunkId) << ", reading " << riff.chunkSize
+                  << " bytes" << std::endl;
 
-        if (riff.chunkId == FMT0 or riff.chunkId == FMT1) {
+        if (riff.chunkId == internal::FMT0 or riff.chunkId == internal::FMT1) {
             auto formatChunk = internal::getFormatChunk(riff.chunkSize);
             std::visit(
                 internal::overloaded {
@@ -297,7 +318,7 @@ static void infer(std::istream& stream, FileDescriptor& descriptor)
             continue;
         }
 
-        if (riff.chunkId == DATA) {
+        if (riff.chunkId == internal::DATA) {
             if (!format.has_value()) {
                 throw std::runtime_error("got 'DATA' chunk before 'fmt ' chunk");
             }
@@ -338,15 +359,12 @@ template <typename... T> void read(std::istream& stream, T&... x)
     stream.seekg(0, std::ios::end);
     std::streampos length = stream.tellg();
     stream.seekg(0, std::ios::beg);
-
     if (length == -1) {
         throw std::runtime_error("failed to determine stream length");
     }
-
     if (!internal::allSizeEqual(x...)) {
         throw std::runtime_error("input containers unequally sized");
     }
-
     FileDescriptor descriptor;
     infer(stream, descriptor);
     std::size_t channelCount = sizeof...(x);
