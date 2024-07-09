@@ -293,8 +293,6 @@ static void infer(std::istream& stream, FileDescriptor& descriptor)
                 throw std::runtime_error("error reading from file");
             }
         }
-        std::cout << "got " << internal::idString(riff.chunkId) << ", reading " << riff.chunkSize
-                  << " bytes" << std::endl;
 
         if (riff.chunkId == internal::FMT0 or riff.chunkId == internal::FMT1) {
             auto formatChunk = internal::getFormat(riff.chunkSize);
