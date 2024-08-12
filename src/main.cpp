@@ -1,7 +1,7 @@
 #include "wav.hpp"
+#include <fstream>
 #include <iostream>
 #include <vector>
-#include <fstream>
 
 // test program that uses wav infer to see what a file is all about...
 int main(int argv, char** argc)
@@ -15,9 +15,8 @@ int main(int argv, char** argc)
         Wav::infer(file, descriptor);
         std::cout << "Sample Rate: " << descriptor.sampleRate << std::endl;
         std::cout << "Sample Count: " << descriptor.sampleCount << " samples" << std::endl;
-        std::cout << "Sample Count: "
-                  << float(descriptor.sampleCount) * (1.0 / float(descriptor.sampleRate))
-                  << " seconds" << std::endl;
+        std::cout << "Sample Count: " << float(descriptor.sampleCount) * (1.0 / float(descriptor.sampleRate)) << " seconds"
+                  << std::endl;
         std::cout << "Channel Count: " << descriptor.channelCount << std::endl;
         std::cout << "File offset: " << descriptor.dataOffset << std::endl;
 
