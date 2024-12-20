@@ -73,4 +73,5 @@ AlignAfterOpenBracket: AlwaysBreak
 BinPackParameters: false
 BinPackArguments: false
 BreakConstructorInitializers: BeforeComma
+IndentRequiresClause: false
 

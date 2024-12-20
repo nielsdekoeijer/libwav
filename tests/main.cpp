@@ -1,10 +1,11 @@
 #define CATCH_CONFIG_MAIN 
-#include "wav.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <memory>
 #include <fstream>
 #include <sstream>
 #include <vector>
+
+#include "Wav.hpp"
 
 TEST_CASE("Binary read") {
     std::string filePath = "tests/files/48000Hz_32bit_float_1ch.wav";

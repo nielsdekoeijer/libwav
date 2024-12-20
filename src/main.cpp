@@ -1,4 +1,4 @@
-#include "wav.hpp"
+#include "Wav.hpp"
 #include <fstream>
 #include <iostream>
 #include <vector>
@@ -21,18 +21,37 @@ int main(int argv, char** argc)
         std::cout << "File offset: " << descriptor.dataOffset << std::endl;
 
         std::cout << "attempting to read..." << std::endl;
-        auto x = std::vector<float>(50000);
-        auto y = std::vector<float>(50000);
-        Wav::read(file, x, y);
-        std::ofstream ofile("out.wav", std::ios::binary);
-        if (!ofile) {
-            throw std::runtime_error("failed to open file at " + std::string(argc[1]));
-        }
-        for (std::size_t i = 0; i < 50000; i++) {
-            std::cout << x[i] << std::endl;
-            std::cout << y[i] << std::endl;
+        if (descriptor.channelCount == 1) {
+            auto x = std::vector<double>(descriptor.sampleCount);
+            Wav::read(file, x);
+            std::ofstream ofile("out.wav", std::ios::binary);
+            if (!ofile) {
+                throw std::runtime_error("failed to open file at " + std::string(argc[1]));
+            }
+            for (std::size_t i = 0; i < descriptor.sampleCount; i++) {
+                std::cout << x[i] << std::endl;
+            }
+
+            Wav::write(ofile, descriptor.sampleRate, x);
+            return 0;
         }
 
-        Wav::write(ofile, descriptor.sampleRate, x, y);
+        if (descriptor.channelCount == 2) {
+            auto x = std::vector<float>(descriptor.sampleCount);
+            auto y = std::vector<float>(descriptor.sampleCount);
+            Wav::read(file, x, y);
+            std::ofstream ofile("out.wav", std::ios::binary);
+            if (!ofile) {
+                throw std::runtime_error("failed to open file at " + std::string(argc[1]));
+            }
+            for (std::size_t i = 0; i < descriptor.sampleCount; i++) {
+                std::cout << x[i] << std::endl;
+                std::cout << y[i] << std::endl;
+            }
+
+            Wav::write(ofile, descriptor.sampleRate, x, y);
+            return 0;
+        }
+        throw std::runtime_error("Unsupported number of channels");
     }
 }
