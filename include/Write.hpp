@@ -3,6 +3,10 @@
 #include <fstream>
 #include <memory>
 
+#include "Data.hpp"
+#include "Header.hpp"
+#include "Variadic.hpp"
+
 namespace Wav {
 // Write a wav file to an N channel f32-pcm file
 // TODO: This is unreadable garbage please change
